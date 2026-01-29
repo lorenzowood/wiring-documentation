@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Executable wrapper for wiring-documentation CLI."""
+
+import sys
+import os
+
+# Add package directory to path
+package_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, package_dir)
+
+from wiring_documentation.cli import main
+
+if __name__ == '__main__':
+    sys.exit(main())
