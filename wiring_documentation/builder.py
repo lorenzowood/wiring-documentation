@@ -31,6 +31,33 @@ class DocumentationPackBuilder:
             return path
         return os.path.abspath(path)
 
+    def _get_data_tabs(self):
+        """Get list of data tabs (for data extraction).
+
+        Returns list from 'data_tabs' in config, or reads from 'tabs_file' for backward compatibility.
+        """
+        if 'data_tabs' in self.config:
+            return self.config['data_tabs']
+        else:
+            # Backward compatibility: read from tabs_file
+            tabs_file = self._resolve_path(self.config['tabs_file'])
+            try:
+                with open(tabs_file, 'r') as f:
+                    return [line.strip() for line in f.readlines() if line.strip()]
+            except FileNotFoundError:
+                raise FileNotFoundError(f"Tabs file not found: {tabs_file}")
+
+    def _get_pages(self):
+        """Get list of pages (for plan PDF discovery).
+
+        Returns list from 'pages' in config, or falls back to data_tabs if not specified.
+        """
+        if 'pages' in self.config:
+            return self.config['pages']
+        else:
+            # Fallback: use data_tabs
+            return self._get_data_tabs()
+
     def _load_config(self):
         """Load and validate the YAML configuration."""
         try:
@@ -41,9 +68,28 @@ class DocumentationPackBuilder:
         except yaml.YAMLError as e:
             raise ValueError(f"Error parsing YAML configuration: {e}")
 
-        # Validate required fields
-        required_fields = ['crops_file', 'tabs_file', 'csv_data_directory',
-                          'plan_pdfs_directory', 'rooms']
+        # Check for new format (data_tabs) or old format (tabs_file)
+        if 'data_tabs' in config:
+            # New format: data_tabs is required
+            if not isinstance(config['data_tabs'], list):
+                raise ValueError("'data_tabs' must be a list")
+
+            # pages is optional; if not specified, defaults to data_tabs
+            if 'pages' in config:
+                if not isinstance(config['pages'], list):
+                    raise ValueError("'pages' must be a list")
+
+            # tabs_file is optional for backward compatibility but deprecated
+            if 'tabs_file' in config:
+                print("Warning: 'tabs_file' is deprecated. Using 'data_tabs' from configuration.")
+        else:
+            # Old format: tabs_file is required
+            if 'tabs_file' not in config:
+                raise ValueError("Either 'data_tabs' (new format) or 'tabs_file' (deprecated) must be specified")
+            print("Warning: Using deprecated 'tabs_file'. Consider migrating to 'data_tabs' and 'pages' format.")
+
+        # Validate other required fields
+        required_fields = ['crops_file', 'csv_data_directory', 'plan_pdfs_directory', 'rooms']
         for field in required_fields:
             if field not in config:
                 raise ValueError(f"Required configuration field missing: {field}")
@@ -78,34 +124,27 @@ class DocumentationPackBuilder:
                 print(f"Cleaned up working directory: {self.working_dir}")
 
     def _find_plan_pdfs(self):
-        """Find and match plan PDFs for each tab."""
+        """Find and match plan PDFs for each page."""
         plan_dir = self._resolve_path(self.config['plan_pdfs_directory'])
-        tabs_file = self._resolve_path(self.config['tabs_file'])
+        pages = self._get_pages()
 
-        # Read tabs list
-        try:
-            with open(tabs_file, 'r') as f:
-                tabs = [line.strip() for line in f.readlines() if line.strip()]
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Tabs file not found: {tabs_file}")
-
-        # Find matching PDFs for each tab
+        # Find matching PDFs for each page
         pdf_pattern = self.config.get('pdf_filename_pattern', '*{tab}*.pdf')
 
-        for tab in tabs:
-            # Replace {tab} placeholder with actual tab name
-            search_pattern = pdf_pattern.replace('{tab}', tab)
+        for page in pages:
+            # Replace {tab} placeholder with actual page name
+            search_pattern = pdf_pattern.replace('{tab}', page)
             search_path = os.path.join(plan_dir, search_pattern)
 
             matching_files = glob.glob(search_path)
 
             if len(matching_files) == 0:
-                raise FileNotFoundError(f"No PDF files found for tab '{tab}' using pattern: {search_pattern}")
+                raise FileNotFoundError(f"No PDF files found for page '{page}' using pattern: {search_pattern}")
             elif len(matching_files) > 1:
-                raise ValueError(f"Multiple PDF files found for tab '{tab}': {matching_files}")
+                raise ValueError(f"Multiple PDF files found for page '{page}': {matching_files}")
             else:
-                self.plan_pdfs[tab] = matching_files[0]
-                print(f"Found PDF for '{tab}': {os.path.basename(matching_files[0])}")
+                self.plan_pdfs[page] = matching_files[0]
+                print(f"Found PDF for '{page}': {os.path.basename(matching_files[0])}")
 
     def _create_cropped_plans(self):
         """Create cropped plan pages for each tab using cropper utility."""
@@ -126,14 +165,10 @@ class DocumentationPackBuilder:
 
     def _riffle_shuffle_plans(self, cropped_files):
         """Combine all cropped plan files using riffle shuffle."""
-        tabs_file = self._resolve_path(self.config['tabs_file'])
+        pages = self._get_pages()
 
-        # Read tabs to maintain order
-        with open(tabs_file, 'r') as f:
-            tabs = [line.strip() for line in f.readlines() if line.strip()]
-
-        # Collect PDF files in tab order
-        pdf_files = [cropped_files[tab] for tab in tabs if tab in cropped_files]
+        # Collect PDF files in page order
+        pdf_files = [cropped_files[page] for page in pages if page in cropped_files]
 
         shuffled_output = os.path.join(self.working_dir, "shuffled_plans.pdf")
 
@@ -149,7 +184,14 @@ class DocumentationPackBuilder:
     def _create_room_data_pages(self, custom_timestamp=None):
         """Create data pages for each room."""
         csv_data_dir = self._resolve_path(self.config['csv_data_directory'])
-        tabs_file = self._resolve_path(self.config['tabs_file'])
+        data_tabs = self._get_data_tabs()
+
+        # Create temporary tabs file for extract_zone_data
+        tabs_file = os.path.join(self.working_dir, "data_tabs.txt")
+        with open(tabs_file, 'w') as f:
+            for tab in data_tabs:
+                f.write(f"{tab}\n")
+
         room_data_files = {}
 
         for room in self.config['rooms']:
@@ -183,7 +225,7 @@ class DocumentationPackBuilder:
     def _check_missing_zones(self, auto_yes=False):
         """Check for zones that don't have any data in the CSV files."""
         csv_data_dir = self._resolve_path(self.config['csv_data_directory'])
-        tabs_file = self._resolve_path(self.config['tabs_file'])
+        data_tabs = self._get_data_tabs()
 
         # Get all zones mentioned in config
         all_zones = set()
@@ -197,12 +239,8 @@ class DocumentationPackBuilder:
         # Get all zones that have data in CSV files
         zones_with_data = set()
 
-        # Read tabs
-        with open(tabs_file, 'r') as f:
-            tabs = [line.strip() for line in f.readlines() if line.strip()]
-
         # Check each CSV file for zones with data
-        for tab in tabs:
+        for tab in data_tabs:
             matching_files = [
                 f for f in os.listdir(csv_data_dir) if f.startswith(tab) and f.endswith(".csv")
             ]
@@ -314,10 +352,9 @@ class DocumentationPackBuilder:
 
     def _combine_final_output(self, room_data_files, shuffled_plans_file, output_path):
         """Combine data pages and plan pages into final output."""
-        # Read the number of tabs to calculate pages per room
-        tabs_file = self._resolve_path(self.config['tabs_file'])
-        with open(tabs_file, 'r') as f:
-            num_tabs = len([line.strip() for line in f.readlines() if line.strip()])
+        # Get the number of plan pages (pages) to calculate pages per room
+        pages = self._get_pages()
+        num_pages = len(pages)
 
         final_writer = PdfWriter()
 
@@ -339,14 +376,14 @@ class DocumentationPackBuilder:
                 # Add plan pages for this room
                 try:
                     crop_position = self._get_crop_position(room_name)
-                    start_page = crop_position * num_tabs
+                    start_page = crop_position * num_pages
 
-                    for page_offset in range(num_tabs):
+                    for page_offset in range(num_pages):
                         page_idx = start_page + page_offset
                         if page_idx < len(shuffled_reader.pages):
                             final_writer.add_page(shuffled_reader.pages[page_idx])
 
-                    print(f"Added {num_tabs} plan page(s) for '{room_name}' (crop position {crop_position})")
+                    print(f"Added {num_pages} plan page(s) for '{room_name}' (crop position {crop_position})")
 
                 except ValueError:
                     # Room not found in crops - this should have been caught earlier, but skip silently
@@ -416,21 +453,39 @@ class DocumentationPackBuilder:
             # Check that all files exist
             print("\nChecking file paths...")
             crops_file = self._resolve_path(self.config['crops_file'])
-            tabs_file = self._resolve_path(self.config['tabs_file'])
             csv_data_dir = self._resolve_path(self.config['csv_data_directory'])
             plan_dir = self._resolve_path(self.config['plan_pdfs_directory'])
 
-            for name, path in [
+            paths_to_check = [
                 ('Crops file', crops_file),
-                ('Tabs file', tabs_file),
                 ('CSV data directory', csv_data_dir),
                 ('Plan PDFs directory', plan_dir)
-            ]:
+            ]
+
+            # Only check tabs_file if using old format
+            if 'tabs_file' in self.config and 'data_tabs' not in self.config:
+                tabs_file = self._resolve_path(self.config['tabs_file'])
+                paths_to_check.append(('Tabs file', tabs_file))
+
+            for name, path in paths_to_check:
                 if os.path.exists(path):
                     print(f"  ✓ {name}: {path}")
                 else:
                     print(f"  ✗ {name} not found: {path}")
                     raise FileNotFoundError(f"{name} not found: {path}")
+
+            # Check tabs configuration
+            print("\nChecking tabs/pages configuration...")
+            if 'data_tabs' in self.config:
+                data_tabs = self._get_data_tabs()
+                pages = self._get_pages()
+                print(f"  ✓ Data tabs: {len(data_tabs)} tabs for data extraction")
+                print(f"  ✓ Plan pages: {len(pages)} page types")
+                if pages != data_tabs:
+                    print(f"    Note: Using different page list than data tabs")
+            else:
+                tabs = self._get_data_tabs()
+                print(f"  ✓ Tabs (from file): {len(tabs)} tabs")
 
             # Check rooms configuration
             print("\nChecking rooms configuration...")
